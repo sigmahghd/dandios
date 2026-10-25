@@ -95,6 +95,22 @@ jobs:
               path.write_text(text)
               manifest[name] = after
           manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+          # CI-discovered source fixes: use public atomic header and omit unused hardware SHA2 assembly.
+          import json
+          updates = [('iokit/Kernel/arm/DandelionCPU.cpp', '#include <arm/atomic.h>', '#include <machine/atomic.h>', 'a8ee8396000ef5f4215fb413c1826b5648049d0937c4a2263ff0251df58c746d', 'ac34774d55c866c5c334cbc6a9fbb942e65b09e24cffe1e38e1e104a4c6d9adc'), ('osfmk/arm64/corecrypto/sha256_compress_arm64.s', '#if defined(__arm64__)', '#if defined(__arm64__) && !defined(DANDELION)', '62c25e2bd0484a4e9b11834be07f7764a1d6836af33dd72140f9ab807a307df2', '8c32e5aba5b15d7f02bf21402955e26f5e8d33da60786f0ea5beaf98b54a35b0')]
+          manifest_path = pathlib.Path("SOURCE_TREE_SHA256.json")
+          manifest = json.loads(manifest_path.read_text())
+          for name, old, new, before, after in updates:
+              path = pathlib.Path("work/xnu") / name
+              text = path.read_text()
+              if hashlib.sha256(text.encode()).hexdigest() != before or manifest[name] != before or text.count(old) != 1:
+                  raise SystemExit("STOP: source overlay precondition " + name)
+              text = text.replace(old, new)
+              if hashlib.sha256(text.encode()).hexdigest() != after:
+                  raise SystemExit("STOP: source overlay result " + name)
+              path.write_text(text)
+              manifest[name] = after
+          manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
           print("Verified and extracted public sources; no phone captures or SDK included.")
 
       - name: Check environment and source snapshot
