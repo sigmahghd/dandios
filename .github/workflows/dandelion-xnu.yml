@@ -189,6 +189,36 @@ jobs:
                       shutil.copyfileobj(source, output)
                   rel.chmod(0o755 if m.mode & 0o111 else 0o644)
 
+      - name: Verify and unpack LK arena source (no private dumps)
+        shell: python3 {0}
+        run: |
+          import hashlib, pathlib, tarfile, shutil
+          archive = pathlib.Path("lk-arena-source.tar.gz")
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != "c78e4d5d5c12b862bec133f257726d3d01d6aee00421694252ba05ed98f5a48a":
+              raise SystemExit("STOP: LK arena source SHA256 mismatch")
+          allowed = {'loader/prepare_in_image.c', 'tests/LK_ARENA_ISA_RESULTS.json', 'platform/lk_arena.c', 'tests/test_real_kernel_fixture.py', 'platform/lk_arena.h', 'tests/LK_ARENA_ARM64_RESULTS.json', 'tests/test_lk_allocator_differential.py', 'tests/emulate_prepare_in_image.py', 'tools/pack_kernel_fixture.py', 'tests/BUILD_IN_IMAGE.sh', 'tests/LK_ALLOCATOR_DIFFERENTIAL_RESULTS.json', 'loader/prepare_in_image.h', 'tests/check_bridge_isa.py', 'LK_ARENA_RU.md', 'tests/PREPARE_IN_IMAGE_RESULTS.json', 'tests/test_prepare_in_image.py', 'tests/test_lk_arena.py', 'tests/LK_ARENA_EVIDENCE.json'}
+          with tarfile.open(archive, "r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 1024*1024:
+                  raise SystemExit("STOP: LK arena archive limits")
+              planned = []
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  if not m.isfile() or not parts or parts[0] != "lk-arena" or ".." in parts:
+                      raise SystemExit("STOP: LK arena source member")
+                  rel = pathlib.Path(*parts[1:])
+                  if str(rel) not in allowed:
+                      raise SystemExit("STOP: LK arena source path")
+                  allowed.remove(str(rel))
+                  planned.append((m, rel))
+              if allowed:
+                  raise SystemExit("STOP: missing LK arena source")
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source, output)
+                  rel.chmod(0o755 if m.mode & 0o111 else 0o644)
+
       - name: Check environment and source snapshot
         shell: bash
         run: |
@@ -251,6 +281,15 @@ jobs:
           python3 tests/test_handoff_contract.py 2>&1 | tee ci-logs/handoff-contract.log
           python3 tests/test_prepare_boot.py --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --expect-sha256 "$KERNEL_SHA" --out build/offline-prepare-boot 2>&1 | tee ci-logs/prepare-boot.log
 
+      - name: Test self-contained Image arena contract (host, synthetic mblock)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          KERNEL_SHA="$(python3 -c 'import json; print(json.load(open("build/macos-dandelion/build-result.json"))["artifact"]["sha256"])')"
+          python3 tests/test_lk_arena.py 2>&1 | tee ci-logs/lk-arena.log
+          python3 tests/test_prepare_in_image.py --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --expect-sha256 "$KERNEL_SHA" --out build/offline-in-image 2>&1 | tee ci-logs/prepare-in-image.log
+
       - name: Preserve logs even on build failure (no SDK/KDK/captures)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -264,6 +303,7 @@ jobs:
             build/macos-dandelion/build-result.json
             build/offline-real-kernel/results.json
             build/offline-prepare-boot/results.json
+            build/offline-in-image/results.json
 
       - name: Preserve built kernel (NOT a flash image)
         if: success() && inputs.mode == 'build'
