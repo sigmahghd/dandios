@@ -62,6 +62,137 @@ jobs:
                   rel.parent.mkdir(parents=True, exist_ok=True)
                   with tf.extractfile(m) as source, rel.open("wb") as output:
                       shutil.copyfileobj(source, output)
+                  rel.chmod(0o755 if m.mode & 0o111 else 0o644)
+          print("Verified and extracted public sources; no phone captures or SDK included.")
+
+      - name: Check environment and source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-logs
+          {
+            sw_vers
+            uname -m
+            df -h .
+            test -d "$DEVELOPER_DIR"
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-path
+            xcrun --sdk macosx --find clang
+            xcrun --sdk macosx --find iig
+            python3 ci/check_snapshot.py
+          } 2>&1 | tee ci-logs/environment.log
+
+      - name: Install verified KDK 13.5 in disposable runner
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/install_kdk.py 2>&1 | tee ci-logs/kdk-install.log
+
+      - name: Build pinned public dependencies
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/prepare_dependencies.py 2>&1 | tee ci-logs/dependencies.log
+
+      - name: Preflight full build inputs
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 build_support/build_kernel_macos.py --check             --fakeroot "$FAKEROOT_DIR" --kdk "$KDKROOT"             2>&1 | tee ci-logs/kernel-preflight.log
+
+      - name: Attempt DEVELOPMENT ARM64 DANDELION build
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 build_support/build_kernel_macos.py --build             --fakeroot "$FAKEROOT_DIR" --kdk "$KDKROOT"             --out "$GITHUB_WORKSPACE/build/macos-dandelion" --jobs 3             2>&1 | tee ci-logs/kernel-runner.log
+
+      - name: Preserve logs even on build failure (no SDK/KDK/captures)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dandelion-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ci-logs/*.log
+            build/macos-dandelion/build.log
+            build/macos-dandelion/build-result.json
+
+      - name: Preserve built kernel (NOT a flash image)
+        if: success() && inputs.mode == 'build'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dandelion-kernel-NOT-FLASHABLE-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: error
+          path: build/macos-dandelion/xnu.obj/kernel.development.dandelionname: Dandelion XNU (experimental)
+
+'on':
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "environment = check tools only; build = dependencies + kernel attempt"
+        required: true
+        type: choice
+        options:
+          - build
+          - environment
+        default: build
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dandelion-xnu-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  xnu:
+    # TEMPORARY: macos-14/Xcode15 is scheduled for retirement 2026-11-02.
+    # Do not silently switch to macos-latest: the old XNU recipe needs validation.
+    runs-on: macos-14
+    timeout-minutes: 180
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+      MODE: ${{ inputs.mode }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - name: Checkout public sources (no persisted credentials)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify and unpack public source bundle
+        shell: python3 {0}
+        run: |
+          import hashlib, pathlib, tarfile, shutil
+          archive = pathlib.Path("source-bundle.tar.gz")
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != "6fd5f24970b02ac703fefe134ecd52affab965689dad2ee7ecfa1d48393d9acb":
+              raise SystemExit("STOP: source bundle SHA256 mismatch")
+          with tarfile.open(archive, "r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) > 10000 or sum(m.size for m in members) > 256*1024*1024:
+                  raise SystemExit("STOP: unexpected source bundle limits")
+              planned = []
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  if not m.isfile() or not parts or parts[0] != "dandelion-xnu-port" or ".." in parts:
+                      raise SystemExit("STOP: unexpected archive member")
+                  rel = pathlib.Path(*parts[1:])
+                  if str(rel) == ".github/workflows/dandelion-xnu.yml":
+                      continue
+                  if not parts[1:] or m.size > 16*1024*1024:
+                      raise SystemExit("STOP: unexpected source file")
+                  planned.append((m, rel))
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source, output)
           print("Verified and extracted public sources; no phone captures or SDK included.")
 
       - name: Check environment and source snapshot
