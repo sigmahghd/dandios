@@ -63,6 +63,13 @@ jobs:
                   with tf.extractfile(m) as source, rel.open("wb") as output:
                       shutil.copyfileobj(source, output)
                   rel.chmod(0o755 if m.mode & 0o111 else 0o644)
+          # Only ARM64 kernel headers were installed; no x86_64 target dependency is needed.
+          recipe = pathlib.Path("ci/prepare_dependencies.py")
+          text = recipe.read_text()
+          old = 'ARCHS="x86_64 arm64" VALID_ARCHS="x86_64 arm64"'
+          if text.count(old) != 1:
+              raise SystemExit("STOP: unexpected firehose architecture recipe")
+          recipe.write_text(text.replace(old, 'ARCHS="arm64" VALID_ARCHS="arm64"'))
           print("Verified and extracted public sources; no phone captures or SDK included.")
 
       - name: Check environment and source snapshot
