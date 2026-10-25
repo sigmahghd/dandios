@@ -159,6 +159,36 @@ jobs:
                       shutil.copyfileobj(source, output)
                   rel.chmod(0o644)
 
+      - name: Verify and unpack handoff integration source
+        shell: python3 {0}
+        run: |
+          import hashlib, pathlib, tarfile, shutil
+          archive = pathlib.Path("handoff-integration-source.tar.gz")
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != "e8c189d329b759099519d747ae1768d1c954df1562ac1fdd2b5480506cfda6b3":
+              raise SystemExit("STOP: handoff source SHA256 mismatch")
+          allowed = {'tests/PREPARE_HANDOFF_ARM64_RESULTS.json', 'tests/test_prepare_boot.py', 'tests/PREPARE_BOOT_RESULTS.json', 'tests/BUILD_HANDOFF.sh', 'loader/prepare_boot.c', 'loader/BUILD.sh', 'tests/emulate_prepare_handoff.py', 'tests/BRIDGE_ISA_RESULTS.json', 'tests/test_handoff_contract.py', 'loader/prepare_boot.h', 'platform/handoff_contract.h', 'tests/check_bridge_isa.py', 'platform/handoff_contract.c', 'loader/load.c', 'HANDOFF_INTEGRATION_RU.md'}
+          with tarfile.open(archive, "r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 1024*1024:
+                  raise SystemExit("STOP: handoff source limits")
+              planned = []
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  if not m.isfile() or not parts or parts[0] != "handoff-integration" or ".." in parts:
+                      raise SystemExit("STOP: handoff source member")
+                  rel = pathlib.Path(*parts[1:])
+                  if str(rel) not in allowed:
+                      raise SystemExit("STOP: handoff source path")
+                  allowed.remove(str(rel))
+                  planned.append((m, rel))
+              if allowed:
+                  raise SystemExit("STOP: handoff source missing file")
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source, output)
+                  rel.chmod(0o755 if m.mode & 0o111 else 0o644)
+
       - name: Check environment and source snapshot
         shell: bash
         run: |
@@ -212,6 +242,15 @@ jobs:
           KERNEL_SHA="$(python3 -c 'import json; print(json.load(open("build/macos-dandelion/build-result.json"))["artifact"]["sha256"])')"
           python3 tests/test_real_kernel_fixture.py --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --expect-sha256 "$KERNEL_SHA" --out build/offline-real-kernel 2>&1 | tee ci-logs/loader-integration.log
 
+      - name: Test pre-copy handoff memory contract (host, not phone)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          KERNEL_SHA="$(python3 -c 'import json; print(json.load(open("build/macos-dandelion/build-result.json"))["artifact"]["sha256"])')"
+          python3 tests/test_handoff_contract.py 2>&1 | tee ci-logs/handoff-contract.log
+          python3 tests/test_prepare_boot.py --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --expect-sha256 "$KERNEL_SHA" --out build/offline-prepare-boot 2>&1 | tee ci-logs/prepare-boot.log
+
       - name: Preserve logs even on build failure (no SDK/KDK/captures)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -224,6 +263,7 @@ jobs:
             build/macos-dandelion/build.log
             build/macos-dandelion/build-result.json
             build/offline-real-kernel/results.json
+            build/offline-prepare-boot/results.json
 
       - name: Preserve built kernel (NOT a flash image)
         if: success() && inputs.mode == 'build'
