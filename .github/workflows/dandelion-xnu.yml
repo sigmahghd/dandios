@@ -249,6 +249,36 @@ jobs:
                       shutil.copyfileobj(source, output)
                   rel.chmod(0o755 if m.mode & 0o111 else 0o644)
 
+      - name: Verify and unpack full prepare-only Image source
+        shell: python3 {0}
+        run: |
+          import hashlib, pathlib, tarfile, shutil
+          archive = pathlib.Path("full-prepare-image-source.tar.gz")
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != "0c6a64a156294e83384bda7cf0130c5e96444312651f06f1c4da0ac1ed4330bf":
+              raise SystemExit("STOP: full Image source SHA256 mismatch")
+          allowed = {'tests/test_real_kernel_fixture.py', 'ci/image-test-requirements.txt', 'tests/FULL_IMAGE_LOCAL_LAYOUT.json', 'tools/build_prepare_image.py', 'ci/prepare_image_tools.py', 'tests/FULL_IMAGE_LOCAL_ENTRY_RESULTS.json', 'FULL_PREPARE_IMAGE_RU.md', 'image/prepare.h', 'image/prepare.ld', 'image/prepare.c', 'tests/test_full_image_lk_gzip.py', 'image/start.S', 'tests/FULL_IMAGE_LOCAL_LK_GZIP_RESULTS.json', 'tests/emulate_full_prepare_image.py'}
+          with tarfile.open(archive, "r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 1024*1024:
+                  raise SystemExit("STOP: full Image source limits")
+              planned = []
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  if not m.isfile() or not parts or parts[0] != "full-prepare-image" or ".." in parts:
+                      raise SystemExit("STOP: full Image source member")
+                  rel = pathlib.Path(*parts[1:])
+                  if str(rel) not in allowed:
+                      raise SystemExit("STOP: full Image source path")
+                  allowed.remove(str(rel))
+                  planned.append((m, rel))
+              if allowed:
+                  raise SystemExit("STOP: missing full Image source")
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source, output)
+                  rel.chmod(0o644)
+
       - name: Check environment and source snapshot
         shell: bash
         run: |
@@ -329,6 +359,31 @@ jobs:
           python3 tests/test_lk_fdt.py 2>&1 | tee ci-logs/lk-fdt.log
           python3 tests/test_prepare_from_fdt.py --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --expect-sha256 "$KERNEL_SHA" --out build/offline-from-fdt 2>&1 | tee ci-logs/prepare-from-fdt.log
 
+      - name: Prepare SHA256-pinned Image compiler and emulator tools
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/prepare_image_tools.py --out "$RUNNER_TEMP/dandelion-image-tools" 2>&1 | tee ci-logs/image-tools.log
+          python3 -m venv "$RUNNER_TEMP/dandelion-image-test-venv"
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" -m pip install --disable-pip-version-check --no-cache-dir --only-binary=:all: --no-deps --require-hashes -r ci/image-test-requirements.txt 2>&1 | tee -a ci-logs/image-tools.log
+
+      - name: Build complete raw PREPARE-ONLY Image (NOT Android Boot)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          KERNEL_SHA="$(python3 -c 'import json; print(json.load(open("build/macos-dandelion/build-result.json"))["artifact"]["sha256"])')"
+          ZIG_PATH="$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/dandelion-image-tools/toolchain.json"))["zig"])')"
+          python3 tools/build_prepare_image.py --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --expect-sha256 "$KERNEL_SHA" --zig "$ZIG_PATH" --out build/prepare-only-image --experimental-prepare-only 2>&1 | tee ci-logs/full-image-build.log
+
+      - name: Emulate complete Image entry (NO ERET or XNU execution)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_full_prepare_image.py --build build/prepare-only-image --out build/full-image-entry-results.json 2>&1 | tee ci-logs/full-image-entry.log
+
       - name: Preserve logs even on build failure (no SDK/KDK/captures)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -344,6 +399,9 @@ jobs:
             build/offline-prepare-boot/results.json
             build/offline-in-image/results.json
             build/offline-from-fdt/results.json
+            build/prepare-only-image/build.log
+            build/prepare-only-image/layout.json
+            build/full-image-entry-results.json
 
       - name: Preserve built kernel (NOT a flash image)
         if: success() && inputs.mode == 'build'
@@ -353,3 +411,17 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           path: build/macos-dandelion/xnu.obj/kernel.development.dandelion
+
+      - name: Preserve complete prepare-only Image (NOT a flash image)
+        if: success() && inputs.mode == 'build'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dandelion-PREPARE-ONLY-NOT-BOOT-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            build/prepare-only-image/NOT-FLASHABLE-prepare-only.Image.gz
+            build/prepare-only-image/prepare-only.elf
+            build/prepare-only-image/layout.json
+            build/prepare-only-image/DO-NOT-FLASH.txt
+            build/full-image-entry-results.json
