@@ -309,6 +309,36 @@ jobs:
                       shutil.copyfileobj(source, output)
                   rel.chmod(0o644)
 
+      - name: Verify and unpack bounded virtual bootstrap model source
+        shell: python3 {0}
+        run: |
+          import hashlib, pathlib, tarfile, shutil
+          archive = pathlib.Path("virtual-bootstrap-source.tar.gz")
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != "fe87c1cc7f4c5a462258e45e5574ef474c6e440d494c9723e3f4629561a85239":
+              raise SystemExit("STOP: virtual bootstrap source SHA256 mismatch")
+          allowed = set(['platform/handoff_el2.S', 'tests/emulate_image_handoff.py', 'tests/virtual_bootstrap_memory.py', 'tests/test_virtual_bootstrap_memory.py', 'VIRTUAL_BOOTSTRAP_MODEL_RU.md', 'tests/VIRTUAL_BOOTSTRAP_LOCAL_RESULTS.json'])
+          with tarfile.open(archive, "r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 1024*1024:
+                  raise SystemExit("STOP: virtual bootstrap archive limits")
+              planned = []
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  if not m.isfile() or len(parts) < 2 or parts[0] != "virtual-bootstrap" or ".." in parts:
+                      raise SystemExit("STOP: virtual bootstrap archive member")
+                  rel = pathlib.Path(*parts[1:])
+                  if str(rel) not in allowed:
+                      raise SystemExit("STOP: virtual bootstrap archive path")
+                  allowed.remove(str(rel))
+                  planned.append((m, rel))
+              if allowed:
+                  raise SystemExit("STOP: missing virtual bootstrap file")
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source, output)
+                  rel.chmod(0o644)
+
       - name: Check environment and source snapshot
         shell: bash
         run: |
@@ -437,6 +467,20 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_image_handoff.py --build build/handoff-cpu-model --out build/handoff-bootstrap-results.json 2>&1 | tee ci-logs/handoff-bootstrap.log
 
+      - name: Test coherent virtual aliases and EL1 access restrictions
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/test_virtual_bootstrap_memory.py 2>&1 | tee ci-logs/virtual-alias-memory.log
+
+      - name: Execute bounded virtual XNU bootstrap (SOFTWARE MMU AND COUNTER MODEL)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_image_handoff.py --build build/handoff-cpu-model --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --virtual-bootstrap --out build/virtual-bootstrap-results.json 2>&1 | tee ci-logs/virtual-bootstrap.log
+
       - name: Preserve logs even on build failure (no SDK/KDK/captures)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -455,6 +499,7 @@ jobs:
             build/handoff-cpu-model/build.log
             build/handoff-cpu-model/layout.json
             build/handoff-bootstrap-results.json
+            build/virtual-bootstrap-results.json
             build/prepare-only-image/build.log
             build/prepare-only-image/layout.json
             build/full-image-entry-results.json
@@ -495,3 +540,4 @@ jobs:
             build/handoff-cpu-model/layout.json
             build/handoff-cpu-model/DO-NOT-FLASH.txt
             build/handoff-bootstrap-results.json
+            build/virtual-bootstrap-results.json
