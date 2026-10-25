@@ -279,6 +279,36 @@ jobs:
                       shutil.copyfileobj(source, output)
                   rel.chmod(0o644)
 
+      - name: Verify and unpack handoff bootstrap CPU model source
+        shell: python3 {0}
+        run: |
+          import hashlib, pathlib, tarfile, shutil
+          archive = pathlib.Path("handoff-bootstrap-source.tar.gz")
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != "341bf06d7b460c4f6ef1db0fc72de421771358375c896edb4d2618bf8f3f729e":
+              raise SystemExit("STOP: handoff bootstrap source SHA256 mismatch")
+          allowed = set(['image/start.S', 'tools/build_prepare_image.py', 'tools/pack_kernel_fixture.py', 'tests/emulate_image_handoff.py', 'tests/check_bootstrap_tables.py', 'tests/test_bootstrap_tables.py', 'HANDOFF_BOOTSTRAP_MODEL_RU.md', 'tests/HANDOFF_BOOTSTRAP_BEFORE_ALIGNMENT.json', 'tests/HANDOFF_BOOTSTRAP_ALIGNED_RESULTS.json'])
+          with tarfile.open(archive, "r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 1024*1024:
+                  raise SystemExit("STOP: handoff bootstrap archive limits")
+              planned = []
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  if not m.isfile() or len(parts) < 2 or parts[0] != "handoff-bootstrap" or ".." in parts:
+                      raise SystemExit("STOP: handoff bootstrap archive member")
+                  rel = pathlib.Path(*parts[1:])
+                  if str(rel) not in allowed:
+                      raise SystemExit("STOP: handoff bootstrap archive path")
+                  allowed.remove(str(rel))
+                  planned.append((m, rel))
+              if allowed:
+                  raise SystemExit("STOP: missing handoff bootstrap file")
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source, output)
+                  rel.chmod(0o644)
+
       - name: Check environment and source snapshot
         shell: bash
         run: |
@@ -384,6 +414,29 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_full_prepare_image.py --build build/prepare-only-image --out build/full-image-entry-results.json 2>&1 | tee ci-logs/full-image-entry.log
 
+      - name: Test independent early-XNU page-table walker
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/test_bootstrap_tables.py 2>&1 | tee ci-logs/bootstrap-table-walker.log
+
+      - name: Build separate HANDOFF CPU MODEL (NEVER for phone)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          KERNEL_SHA="$(python3 -c 'import json; print(json.load(open("build/macos-dandelion/build-result.json"))["artifact"]["sha256"])')"
+          ZIG_PATH="$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/dandelion-image-tools/toolchain.json"))["zig"])')"
+          python3 tools/build_prepare_image.py --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --expect-sha256 "$KERNEL_SHA" --zig "$ZIG_PATH" --out build/handoff-cpu-model --experimental-handoff-model-only 2>&1 | tee ci-logs/handoff-model-build.log
+
+      - name: Model Image handoff and execute bounded XNU bootstrap (NO hardware/MMU enable)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_image_handoff.py --build build/handoff-cpu-model --out build/handoff-bootstrap-results.json 2>&1 | tee ci-logs/handoff-bootstrap.log
+
       - name: Preserve logs even on build failure (no SDK/KDK/captures)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -399,6 +452,9 @@ jobs:
             build/offline-prepare-boot/results.json
             build/offline-in-image/results.json
             build/offline-from-fdt/results.json
+            build/handoff-cpu-model/build.log
+            build/handoff-cpu-model/layout.json
+            build/handoff-bootstrap-results.json
             build/prepare-only-image/build.log
             build/prepare-only-image/layout.json
             build/full-image-entry-results.json
@@ -425,3 +481,17 @@ jobs:
             build/prepare-only-image/layout.json
             build/prepare-only-image/DO-NOT-FLASH.txt
             build/full-image-entry-results.json
+
+      - name: Preserve CPU MODEL only (NOT a phone image)
+        if: success() && inputs.mode == 'build'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dandelion-CPU-MODEL-NOT-FOR-PHONE-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            build/handoff-cpu-model/MODEL-ONLY-NOT-FOR-PHONE-handoff.Image.gz
+            build/handoff-cpu-model/handoff-model.elf
+            build/handoff-cpu-model/layout.json
+            build/handoff-cpu-model/DO-NOT-FLASH.txt
+            build/handoff-bootstrap-results.json
