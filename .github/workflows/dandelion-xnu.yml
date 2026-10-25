@@ -219,6 +219,36 @@ jobs:
                       shutil.copyfileobj(source, output)
                   rel.chmod(0o755 if m.mode & 0o111 else 0o644)
 
+      - name: Verify and unpack FDT gate source (no private dumps)
+        shell: python3 {0}
+        run: |
+          import hashlib, pathlib, tarfile, shutil
+          archive = pathlib.Path("fdt-gate-source.tar.gz")
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != "61917567facba84aeb0985c03f721d4bb730197b044ef6c63f29f42889d412f1":
+              raise SystemExit("STOP: FDT gate source SHA256 mismatch")
+          allowed = {'loader/prepare_from_fdt.c', 'tests/test_prepare_from_fdt.py', 'loader/prepare_from_fdt.h', 'loader/stage0_fdt_gate.h', 'platform/lk_fdt.h', 'tests/test_lk_fdt.py', 'loader/stage0_fdt_gate.S', 'tests/emulate_prepare_from_fdt.py', 'tests/check_bridge_isa.py', 'loader/stage0_fdt_gate.c', 'FDT_GATE_RU.md', 'tests/BUILD_FROM_FDT.sh', 'tests/FDT_GATE_FORMAT_EVIDENCE.json', 'platform/lk_fdt.c', 'tests/FDT_GATE_ISA_RESULTS.json', 'tests/FDT_GATE_HOST_RESULTS.json', 'tests/FDT_GATE_ARM64_RESULTS.json'}
+          with tarfile.open(archive, "r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 1024*1024:
+                  raise SystemExit("STOP: FDT gate archive limits")
+              planned = []
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  if not m.isfile() or not parts or parts[0] != "fdt-gate" or ".." in parts:
+                      raise SystemExit("STOP: FDT gate source member")
+                  rel = pathlib.Path(*parts[1:])
+                  if str(rel) not in allowed:
+                      raise SystemExit("STOP: FDT gate source path")
+                  allowed.remove(str(rel))
+                  planned.append((m, rel))
+              if allowed:
+                  raise SystemExit("STOP: missing FDT gate source")
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source, output)
+                  rel.chmod(0o755 if m.mode & 0o111 else 0o644)
+
       - name: Check environment and source snapshot
         shell: bash
         run: |
@@ -290,6 +320,15 @@ jobs:
           python3 tests/test_lk_arena.py 2>&1 | tee ci-logs/lk-arena.log
           python3 tests/test_prepare_in_image.py --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --expect-sha256 "$KERNEL_SHA" --out build/offline-in-image 2>&1 | tee ci-logs/prepare-in-image.log
 
+      - name: Test incoming FDT to Image-arena kernel preparation (host only)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          KERNEL_SHA="$(python3 -c 'import json; print(json.load(open("build/macos-dandelion/build-result.json"))["artifact"]["sha256"])')"
+          python3 tests/test_lk_fdt.py 2>&1 | tee ci-logs/lk-fdt.log
+          python3 tests/test_prepare_from_fdt.py --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --expect-sha256 "$KERNEL_SHA" --out build/offline-from-fdt 2>&1 | tee ci-logs/prepare-from-fdt.log
+
       - name: Preserve logs even on build failure (no SDK/KDK/captures)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -304,6 +343,7 @@ jobs:
             build/offline-real-kernel/results.json
             build/offline-prepare-boot/results.json
             build/offline-in-image/results.json
+            build/offline-from-fdt/results.json
 
       - name: Preserve built kernel (NOT a flash image)
         if: success() && inputs.mode == 'build'
