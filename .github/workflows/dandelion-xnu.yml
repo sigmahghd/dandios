@@ -79,6 +79,22 @@ jobs:
           if text.count(old) != 1:
               raise SystemExit("STOP: unexpected kernel preflight recipe")
           runner.write_text(text.replace(old, new))
+          # CI-discovered source fixes: missing barrier constants and 36-bit user VA.
+          import json
+          updates = [('iokit/Kernel/arm/DandelionCPU.cpp', '#include <arm64/proc_reg.h>', '#include <arm64/proc_reg.h>\n#include <arm/atomic.h>', 'cb0fbf05bb177254c134bfd393151a3b638a565d8d49df0dfad9a81458397ed1', 'a8ee8396000ef5f4215fb413c1826b5648049d0937c4a2263ff0251df58c746d'), ('osfmk/mach/arm/vm_param.h', '#if (defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_DriverKit)) && !defined(A5XELTE)', '#if (defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_DriverKit)) && !defined(A5XELTE) && !defined(DANDELION)', '61f13aaa8dbce71733aecb612d2a8cf16689dea10d264f72a7bf59beb7b30afc', '9f207259b4211b0a185c45cc4b97c213fd1c34b10a72d77aa638d72e158f183c')]
+          manifest_path = pathlib.Path("SOURCE_TREE_SHA256.json")
+          manifest = json.loads(manifest_path.read_text())
+          for name, old, new, before, after in updates:
+              path = pathlib.Path("work/xnu") / name
+              text = path.read_text()
+              if hashlib.sha256(text.encode()).hexdigest() != before or manifest[name] != before or text.count(old) != 1:
+                  raise SystemExit("STOP: source overlay precondition " + name)
+              text = text.replace(old, new)
+              if hashlib.sha256(text.encode()).hexdigest() != after:
+                  raise SystemExit("STOP: source overlay result " + name)
+              path.write_text(text)
+              manifest[name] = after
+          manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
           print("Verified and extracted public sources; no phone captures or SDK included.")
 
       - name: Check environment and source snapshot
