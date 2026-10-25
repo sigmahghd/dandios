@@ -70,6 +70,15 @@ jobs:
           if text.count(old) != 1:
               raise SystemExit("STOP: unexpected firehose architecture recipe")
           recipe.write_text(text.replace(old, 'ARCHS="arm64" VALID_ARCHS="arm64"'))
+          # Dandelion does not link Apple-platform KDK archives (MakeInc.def).
+          # Kernel headers come from the source-built fakeroot, not the debug kit.
+          runner = pathlib.Path("build_support/build_kernel_macos.py")
+          text = runner.read_text()
+          old = " if not list(kdk.rglob('Kernel.framework')):errors.append('KDK does not contain Kernel.framework')"
+          new = " if not (fakeroot/'System/Library/Frameworks/Kernel.framework/PrivateHeaders/mach/mach_types.h').is_file():errors.append('prepared fakeroot missing exported XNU mach headers')"
+          if text.count(old) != 1:
+              raise SystemExit("STOP: unexpected kernel preflight recipe")
+          runner.write_text(text.replace(old, new))
           print("Verified and extracted public sources; no phone captures or SDK included.")
 
       - name: Check environment and source snapshot
