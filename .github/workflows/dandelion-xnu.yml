@@ -473,6 +473,35 @@ jobs:
                       shutil.copyfileobj(source,output)
                   rel.chmod(0o644)
 
+      - name: Verify conditional TLBI and owned physmap sources
+        shell: python3 {0}
+        run: |
+          import pathlib, hashlib, base64, tarfile, io, shutil
+          blob = base64.b64decode(pathlib.Path("tlbi-physmap-source.tar.gz.b64").read_bytes().strip(), validate=True)
+          if hashlib.sha256(blob).hexdigest() != "44068c38218490d6f1028070b059cfd70f4d184e5612a4634923f96dee67d901":
+              raise SystemExit("STOP: TLBI physmap source SHA mismatch")
+          allowed = set(['tests/emulate_image_handoff.py', 'tests/audit_ttbr_candidate.py', 'tests/tlbi_completion.py', 'tests/test_tlbi_completion.py', 'tests/post_tlbi_aliases.py', 'tests/test_post_tlbi_aliases.py', 'tests/owned_physmap.py', 'tests/test_owned_physmap.py', 'tests/pte_write_audit.py', 'tests/test_pte_write_audit.py', 'tests/validate_tlbi_physmap.py', 'TLBI_PHYSMAP_MODEL_RU.md'])
+          with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 1024*1024:
+                  raise SystemExit("STOP: TLBI physmap archive limits")
+              planned = []
+              seen = set()
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  rel = "/".join(parts[1:])
+                  if not m.isfile() or not parts or parts[0] != "tlbi-physmap" or ".." in parts or rel not in allowed or rel in seen or m.size > 256*1024:
+                      raise SystemExit("STOP: invalid TLBI physmap member")
+                  seen.add(rel)
+                  planned.append((m,pathlib.Path(rel)))
+              if seen != allowed:
+                  raise SystemExit("STOP: incomplete TLBI physmap source")
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source,output)
+                  rel.chmod(0o644)
+
       - name: Install verified KDK 13.5 in disposable runner
         if: inputs.mode == 'build'
         shell: bash
@@ -681,6 +710,45 @@ jobs:
             build/ttbr-consensus-results.json
             TTBR_CONSENSUS_MODEL_RU.md
 
+      - name: Test conditional TLBI completion, owned aliases and blocked PTE audit
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY="$RUNNER_TEMP/dandelion-image-test-venv/bin/python"
+          "$PY" tests/test_tlbi_completion.py 2>&1 | tee ci-logs/tlbi-completion-tests.log
+          "$PY" tests/test_post_tlbi_aliases.py 2>&1 | tee ci-logs/post-tlbi-alias-tests.log
+          "$PY" tests/test_owned_physmap.py 2>&1 | tee ci-logs/owned-physmap-tests.log
+          "$PY" tests/test_pte_write_audit.py 2>&1 | tee ci-logs/blocked-pte-audit-tests.log
+
+      - name: Execute conditional TLBI completion without additional aliases
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_image_handoff.py --build build/handoff-cpu-model --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --virtual-bootstrap --cache-profile tests/fixtures/dandelion-cpu0-cache-profile.json --cache-profile-only --enter-arm-vm-model --ttbr-consensus-model --tlbi-completion-model --out build/tlbi-completion-results.json 2>&1 | tee ci-logs/tlbi-completion-execution.log
+          python3 tests/validate_tlbi_physmap.py build/tlbi-completion-results.json --profile tests/fixtures/dandelion-cpu0-cache-profile.json 2>&1 | tee ci-logs/tlbi-completion-validation.log
+
+      - name: Execute XNU-owned physmap model and BLOCK active PTE mutation
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_image_handoff.py --build build/handoff-cpu-model --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --virtual-bootstrap --cache-profile tests/fixtures/dandelion-cpu0-cache-profile.json --cache-profile-only --enter-arm-vm-model --ttbr-consensus-model --tlbi-completion-model --owned-physmap-model --out build/owned-physmap-results.json 2>&1 | tee ci-logs/owned-physmap-execution.log
+          python3 tests/validate_tlbi_physmap.py build/owned-physmap-results.json --profile tests/fixtures/dandelion-cpu0-cache-profile.json --expect-owned-physmap 2>&1 | tee ci-logs/owned-physmap-validation.log
+
+      - name: Preserve conditional TLBI PHYSMAP MODEL report (NOT a phone image)
+        if: success() && inputs.mode == 'build'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dandelion-TLBI-PHYSMAP-MODEL-REPORT-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            build/tlbi-completion-results.json
+            build/owned-physmap-results.json
+            TLBI_PHYSMAP_MODEL_RU.md
+
       - name: Test cache-operation model policy (DC ZVA is NOT a no-op)
         if: inputs.mode == 'build'
         shell: bash
@@ -731,6 +799,8 @@ jobs:
             build/measured-cache-bootstrap-results.json
             build/arm-vm-bounded-results.json
             build/ttbr-consensus-results.json
+            build/tlbi-completion-results.json
+            build/owned-physmap-results.json
             build/prepare-only-image/build.log
             build/prepare-only-image/layout.json
             build/full-image-entry-results.json
@@ -777,3 +847,5 @@ jobs:
             build/measured-cache-bootstrap-results.json
             build/arm-vm-bounded-results.json
             build/ttbr-consensus-results.json
+            build/tlbi-completion-results.json
+            build/owned-physmap-results.json
