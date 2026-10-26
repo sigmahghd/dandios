@@ -415,6 +415,35 @@ jobs:
                       shutil.copyfileobj(source,output)
                   rel.chmod(0o644)
 
+      - name: Verify bounded arm_vm model sources (no phone dumps)
+        shell: python3 {0}
+        run: |
+          import pathlib, hashlib, base64, tarfile, io, shutil
+          blob = base64.b64decode(pathlib.Path("arm-vm-bounded-source.tar.gz.b64").read_bytes().strip(), validate=True)
+          if hashlib.sha256(blob).hexdigest() != "1a49b8465a58ec6fd36db19ea3c830f670125a0fc1ab1a59d6eec6934909450c":
+              raise SystemExit("STOP: arm-vm source SHA mismatch")
+          allowed = set(['tests/virtual_bootstrap_memory.py', 'tests/test_virtual_bootstrap_memory.py', 'tests/emulate_image_handoff.py', 'tests/model_dc_zva.py', 'tests/test_model_dc_zva.py', 'tests/model_at_par.py', 'tests/test_model_at_par.py', 'tests/audit_ttbr_candidate.py', 'tests/test_audit_ttbr_candidate.py', 'tests/validate_arm_vm_probe.py', 'ARM_VM_BOUNDED_MODEL_RU.md'])
+          with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 1024*1024:
+                  raise SystemExit("STOP: arm-vm archive limits")
+              planned = []
+              seen = set()
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  rel = "/".join(parts[1:])
+                  if not m.isfile() or not parts or parts[0] != "arm-vm-bounded" or ".." in parts or rel not in allowed or rel in seen or m.size > 256*1024:
+                      raise SystemExit("STOP: invalid arm-vm member")
+                  seen.add(rel)
+                  planned.append((m,pathlib.Path(rel)))
+              if seen != allowed:
+                  raise SystemExit("STOP: incomplete arm-vm source")
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source,output)
+                  rel.chmod(0o644)
+
       - name: Install verified KDK 13.5 in disposable runner
         if: inputs.mode == 'build'
         shell: bash
@@ -568,6 +597,35 @@ jobs:
             tests/fixtures/dandelion-cpu0-cache-profile.json
             MEASURED_CACHE_BRINGUP_RU.md
 
+      - name: Test bounded zero, AT-PAR and candidate-table audit
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY="$RUNNER_TEMP/dandelion-image-test-venv/bin/python"
+          "$PY" tests/test_model_dc_zva.py 2>&1 | tee ci-logs/bounded-dc-zva.log
+          "$PY" tests/test_model_at_par.py 2>&1 | tee ci-logs/bounded-at-par.log
+          "$PY" tests/test_audit_ttbr_candidate.py 2>&1 | tee ci-logs/candidate-table-audit.log
+
+      - name: Execute bounded arm_vm_init and audit UNAPPLIED TTBR1 candidate
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_image_handoff.py --build build/handoff-cpu-model --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --virtual-bootstrap --cache-profile tests/fixtures/dandelion-cpu0-cache-profile.json --cache-profile-only --enter-arm-vm-model --out build/arm-vm-bounded-results.json 2>&1 | tee ci-logs/arm-vm-bounded.log
+          python3 tests/validate_arm_vm_probe.py build/arm-vm-bounded-results.json --profile tests/fixtures/dandelion-cpu0-cache-profile.json 2>&1 | tee ci-logs/arm-vm-validation.log
+
+      - name: Preserve bounded arm_vm MODEL report (NOT a phone image)
+        if: success() && inputs.mode == 'build'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dandelion-ARM-VM-BOUNDED-MODEL-REPORT-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            build/arm-vm-bounded-results.json
+            ARM_VM_BOUNDED_MODEL_RU.md
+
       - name: Test cache-operation model policy (DC ZVA is NOT a no-op)
         if: inputs.mode == 'build'
         shell: bash
@@ -616,6 +674,7 @@ jobs:
             build/handoff-bootstrap-results.json
             build/virtual-bootstrap-results.json
             build/measured-cache-bootstrap-results.json
+            build/arm-vm-bounded-results.json
             build/prepare-only-image/build.log
             build/prepare-only-image/layout.json
             build/full-image-entry-results.json
@@ -660,3 +719,4 @@ jobs:
             build/handoff-bootstrap-results.json
             build/virtual-bootstrap-results.json
             build/measured-cache-bootstrap-results.json
+            build/arm-vm-bounded-results.json
