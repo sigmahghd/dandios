@@ -502,6 +502,35 @@ jobs:
                       shutil.copyfileobj(source,output)
                   rel.chmod(0o644)
 
+      - name: Verify journaled EMPTY-table publication model sources
+        shell: python3 {0}
+        run: |
+          import pathlib, hashlib, base64, tarfile, io, shutil
+          blob = base64.b64decode(pathlib.Path("empty-table-publication-source.tar.gz.b64").read_bytes().strip(), validate=True)
+          if hashlib.sha256(blob).hexdigest() != "d8dd67fcee632b29b589258781a8836023400dc05d73fd8ff2ee251c8d26e156":
+              raise SystemExit("STOP: empty-table source SHA mismatch")
+          allowed = set(['tests/emulate_image_handoff.py', 'tests/empty_table_publication.py', 'tests/test_empty_table_publication.py', 'tests/validate_empty_publication.py', 'tests/pte_write_audit.py', 'EMPTY_TABLE_PUBLICATION_RU.md'])
+          with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 1024*1024:
+                  raise SystemExit("STOP: empty-table archive limits")
+              planned = []
+              seen = set()
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  rel = "/".join(parts[1:])
+                  if not m.isfile() or not parts or parts[0] != "empty-table-publication" or ".." in parts or rel not in allowed or rel in seen or m.size > 256*1024:
+                      raise SystemExit("STOP: invalid empty-table member")
+                  seen.add(rel)
+                  planned.append((m,pathlib.Path(rel)))
+              if seen != allowed:
+                  raise SystemExit("STOP: incomplete empty-table source")
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source,output)
+                  rel.chmod(0o644)
+
       - name: Install verified KDK 13.5 in disposable runner
         if: inputs.mode == 'build'
         shell: bash
@@ -749,6 +778,32 @@ jobs:
             build/owned-physmap-results.json
             TLBI_PHYSMAP_MODEL_RU.md
 
+      - name: Test journaled EMPTY-table publication (all other PTE writes stay blocked)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/test_empty_table_publication.py 2>&1 | tee ci-logs/empty-table-publication-tests.log
+
+      - name: Execute conditional empty-table publications and verify arm_vm_init RETURN
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_image_handoff.py --build build/handoff-cpu-model --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --virtual-bootstrap --cache-profile tests/fixtures/dandelion-cpu0-cache-profile.json --cache-profile-only --enter-arm-vm-model --ttbr-consensus-model --tlbi-completion-model --owned-physmap-model --empty-table-publication-model --out build/empty-table-publication-results.json 2>&1 | tee ci-logs/empty-table-publication-execution.log
+          python3 tests/validate_empty_publication.py build/empty-table-publication-results.json --profile tests/fixtures/dandelion-cpu0-cache-profile.json 2>&1 | tee ci-logs/empty-table-publication-validation.log
+
+      - name: Preserve conditional EMPTY TABLE MODEL report (NOT a phone image)
+        if: success() && inputs.mode == 'build'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dandelion-EMPTY-TABLE-MODEL-REPORT-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            build/empty-table-publication-results.json
+            EMPTY_TABLE_PUBLICATION_RU.md
+
       - name: Test cache-operation model policy (DC ZVA is NOT a no-op)
         if: inputs.mode == 'build'
         shell: bash
@@ -801,6 +856,7 @@ jobs:
             build/ttbr-consensus-results.json
             build/tlbi-completion-results.json
             build/owned-physmap-results.json
+            build/empty-table-publication-results.json
             build/prepare-only-image/build.log
             build/prepare-only-image/layout.json
             build/full-image-entry-results.json
@@ -849,3 +905,4 @@ jobs:
             build/ttbr-consensus-results.json
             build/tlbi-completion-results.json
             build/owned-physmap-results.json
+            build/empty-table-publication-results.json
