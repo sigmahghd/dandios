@@ -444,6 +444,35 @@ jobs:
                       shutil.copyfileobj(source,output)
                   rel.chmod(0o644)
 
+      - name: Verify conditional TTBR consensus model sources
+        shell: python3 {0}
+        run: |
+          import pathlib, hashlib, base64, tarfile, io, shutil
+          blob = base64.b64decode(pathlib.Path("ttbr-consensus-source.tar.gz.b64").read_bytes().strip(), validate=True)
+          if hashlib.sha256(blob).hexdigest() != "bba099f1fd96432a5201dd4de97a50dd4b363a5b42a5f33ccb4c265b56fc45fc":
+              raise SystemExit("STOP: TTBR source SHA mismatch")
+          allowed = set(['tests/emulate_image_handoff.py', 'tests/audit_ttbr_candidate.py', 'tests/test_audit_ttbr_candidate.py', 'tests/ttbr_consensus.py', 'tests/test_ttbr_consensus.py', 'tests/validate_ttbr_consensus.py', 'TTBR_CONSENSUS_MODEL_RU.md'])
+          with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 1024*1024:
+                  raise SystemExit("STOP: TTBR archive limits")
+              planned = []
+              seen = set()
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  rel = "/".join(parts[1:])
+                  if not m.isfile() or not parts or parts[0] != "ttbr-consensus" or ".." in parts or rel not in allowed or rel in seen or m.size > 256*1024:
+                      raise SystemExit("STOP: invalid TTBR member")
+                  seen.add(rel)
+                  planned.append((m,pathlib.Path(rel)))
+              if seen != allowed:
+                  raise SystemExit("STOP: incomplete TTBR source")
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source,output)
+                  rel.chmod(0o644)
+
       - name: Install verified KDK 13.5 in disposable runner
         if: inputs.mode == 'build'
         shell: bash
@@ -626,6 +655,32 @@ jobs:
             build/arm-vm-bounded-results.json
             ARM_VM_BOUNDED_MODEL_RU.md
 
+      - name: Test conditional TTBR agreement envelope
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/test_ttbr_consensus.py 2>&1 | tee ci-logs/ttbr-consensus-tests.log
+
+      - name: Execute conditional TTBR1 and TTBR0 model (STOP BEFORE TLBI)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_image_handoff.py --build build/handoff-cpu-model --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --virtual-bootstrap --cache-profile tests/fixtures/dandelion-cpu0-cache-profile.json --cache-profile-only --enter-arm-vm-model --ttbr-consensus-model --out build/ttbr-consensus-results.json 2>&1 | tee ci-logs/ttbr-consensus-execution.log
+          python3 tests/validate_ttbr_consensus.py build/ttbr-consensus-results.json --profile tests/fixtures/dandelion-cpu0-cache-profile.json 2>&1 | tee ci-logs/ttbr-consensus-validation.log
+
+      - name: Preserve conditional TTBR MODEL report (NOT a phone image)
+        if: success() && inputs.mode == 'build'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dandelion-TTBR-CONSENSUS-MODEL-REPORT-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            build/ttbr-consensus-results.json
+            TTBR_CONSENSUS_MODEL_RU.md
+
       - name: Test cache-operation model policy (DC ZVA is NOT a no-op)
         if: inputs.mode == 'build'
         shell: bash
@@ -675,6 +730,7 @@ jobs:
             build/virtual-bootstrap-results.json
             build/measured-cache-bootstrap-results.json
             build/arm-vm-bounded-results.json
+            build/ttbr-consensus-results.json
             build/prepare-only-image/build.log
             build/prepare-only-image/layout.json
             build/full-image-entry-results.json
@@ -720,3 +776,4 @@ jobs:
             build/virtual-bootstrap-results.json
             build/measured-cache-bootstrap-results.json
             build/arm-vm-bounded-results.json
+            build/ttbr-consensus-results.json
