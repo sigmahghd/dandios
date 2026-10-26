@@ -386,6 +386,35 @@ jobs:
                       shutil.copyfileobj(source, output)
                   rel.chmod(0o644)
 
+      - name: Verify and unpack measured-cache bootstrap model (no raw phone dumps)
+        shell: python3 {0}
+        run: |
+          import pathlib, hashlib, base64, tarfile, io, shutil
+          blob = base64.b64decode(pathlib.Path("measured-cache-bootstrap-source.tar.gz.b64").read_bytes().strip(), validate=True)
+          if hashlib.sha256(blob).hexdigest() != "024dceec59d6135a85f6d9432882ea79d791e3258293564b92005ac7eaa56213":
+              raise SystemExit("STOP: measured-cache source SHA mismatch")
+          allowed = set(['tests/emulate_image_handoff.py', 'tests/pstate_masks.py', 'tests/test_pstate_masks.py', 'tests/check_cache_state.py', 'tests/test_cache_state.py', 'tests/fixtures/dandelion-cpu0-cache-profile.json', 'tests/validate_measured_bootstrap.py', 'MEASURED_CACHE_BRINGUP_RU.md'])
+          with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 1024*1024:
+                  raise SystemExit("STOP: measured-cache archive limits")
+              planned = []
+              seen = set()
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  rel = "/".join(parts[1:])
+                  if not m.isfile() or not parts or parts[0] != "measured-cache" or ".." in parts or rel not in allowed or rel in seen or m.size > 256*1024:
+                      raise SystemExit("STOP: invalid measured-cache member")
+                  seen.add(rel)
+                  planned.append((m,pathlib.Path(rel)))
+              if seen != allowed:
+                  raise SystemExit("STOP: incomplete measured-cache source")
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source,output)
+                  rel.chmod(0o644)
+
       - name: Install verified KDK 13.5 in disposable runner
         if: inputs.mode == 'build'
         shell: bash
@@ -511,6 +540,34 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_image_handoff.py --build build/handoff-cpu-model --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --virtual-bootstrap --out build/virtual-bootstrap-results.json 2>&1 | tee ci-logs/virtual-bootstrap.log
 
+      - name: Test DAIF mask semantics and XNU cache-state validator
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/test_pstate_masks.py 2>&1 | tee ci-logs/pstate-masks.log
+          python3 tests/test_cache_state.py 2>&1 | tee ci-logs/xnu-cache-state.log
+
+      - name: Execute XNU with measured dandelion cache registers (SOFTWARE MODEL ONLY)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_image_handoff.py --build build/handoff-cpu-model --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --virtual-bootstrap --cache-profile tests/fixtures/dandelion-cpu0-cache-profile.json --cache-profile-only --out build/measured-cache-bootstrap-results.json 2>&1 | tee ci-logs/measured-cache-bootstrap.log
+          python3 tests/validate_measured_bootstrap.py build/measured-cache-bootstrap-results.json --profile tests/fixtures/dandelion-cpu0-cache-profile.json 2>&1 | tee ci-logs/measured-cache-validation.log
+
+      - name: Preserve measured-cache CPU MODEL report (NOT a phone image)
+        if: success() && inputs.mode == 'build'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dandelion-MEASURED-CACHE-MODEL-REPORT-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            build/measured-cache-bootstrap-results.json
+            tests/fixtures/dandelion-cpu0-cache-profile.json
+            MEASURED_CACHE_BRINGUP_RU.md
+
       - name: Test cache-operation model policy (DC ZVA is NOT a no-op)
         if: inputs.mode == 'build'
         shell: bash
@@ -558,6 +615,7 @@ jobs:
             build/handoff-cpu-model/layout.json
             build/handoff-bootstrap-results.json
             build/virtual-bootstrap-results.json
+            build/measured-cache-bootstrap-results.json
             build/prepare-only-image/build.log
             build/prepare-only-image/layout.json
             build/full-image-entry-results.json
@@ -601,3 +659,4 @@ jobs:
             build/handoff-cpu-model/DO-NOT-FLASH.txt
             build/handoff-bootstrap-results.json
             build/virtual-bootstrap-results.json
+            build/measured-cache-bootstrap-results.json
