@@ -361,9 +361,9 @@ jobs:
         run: |
           import hashlib, pathlib, tarfile, shutil
           archive = pathlib.Path("register-cache-probe-source.tar.gz")
-          if hashlib.sha256(archive.read_bytes()).hexdigest() != "7a89c915a4425b84ec7fdd6871586d29757b3f5bfa06dbe323b2b8e6c3d0bb5f":
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != "480af30859d5003e369d1fd1f1b46a91e460f0714d3dab8cfcaa0404d5a1bb80":
               raise SystemExit("STOP: register probe source SHA mismatch")
-          allowed = set(['cache_probe/README_RU.md', 'cache_probe/avbtool.py', 'cache_probe/build_probe.py', 'cache_probe/decode_cache.py', 'cache_probe/prepare_on_pc.py', 'cache_probe/probe.S', 'cache_probe/probe.ld', 'cache_probe/profile.py', 'cache_probe/read_expdb.py', 'cache_probe/test_probe.py', 'tests/cache_operation_policy.py', 'tests/emulate_image_handoff.py', 'tests/test_cache_operation_policy.py'])
+          allowed = set(['cache_probe/README_RU.md', 'cache_probe/avbtool.py', 'cache_probe/build_probe.py', 'cache_probe/decode_cache.py', 'cache_probe/prepare_on_pc.py', 'cache_probe/probe.S', 'cache_probe/probe.ld', 'cache_probe/profile.py', 'cache_probe/read_expdb.py', 'cache_probe/test_probe.py', 'tests/cache_operation_policy.py', 'tests/cache_register_profile.py', 'tests/emulate_image_handoff.py', 'tests/test_cache_operation_policy.py', 'tests/test_cache_register_profile.py'])
           with tarfile.open(archive, "r:gz") as tf:
               members = tf.getmembers()
               if len(members) != len(allowed) or sum(m.size for m in members) > 2*1024*1024:
@@ -516,6 +516,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tests/test_cache_operation_policy.py 2>&1 | tee ci-logs/cache-operation-policy.log
+          python3 tests/test_cache_register_profile.py 2>&1 | tee ci-logs/cache-register-profile.log
 
       - name: Build and audit register-only hardware diagnostic (NOT XNU)
         if: inputs.mode == 'build'
@@ -526,6 +527,7 @@ jobs:
           python3 cache_probe/build_probe.py --zig "$ZIG_PATH" --nonce "${{ github.run_id }}" --out build/register-probe-kit 2>&1 | tee ci-logs/register-probe-build.log
           "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" cache_probe/test_probe.py --build build/register-probe-kit --out build/register-probe-kit/host-test-results.json 2>&1 | tee ci-logs/register-probe-tests.log
           cp cache_probe/*.py cache_probe/README_RU.md build/register-probe-kit/
+          cp tests/cache_register_profile.py build/register-probe-kit/
 
       - name: Preserve experimental register diagnostic kit (no private Boot or DTB)
         if: success() && inputs.mode == 'build'
