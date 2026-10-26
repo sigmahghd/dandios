@@ -531,6 +531,36 @@ jobs:
                       shutil.copyfileobj(source,output)
                   rel.chmod(0o644)
 
+      - name: Restore bounded framebuffer descriptor publication model (NO framebuffer backing)
+        if: inputs.mode == 'build'
+        shell: python3 {0}
+        run: |
+          import pathlib, hashlib, base64, tarfile, io, shutil
+          blob = base64.b64decode(pathlib.Path("framebuffer-publication-source.tar.gz.b64").read_bytes().strip(), validate=True)
+          if hashlib.sha256(blob).hexdigest() != "b2b314320853c3e2584426a43ed57eac1c89004906b3076f2d3489fc296287f8":
+              raise SystemExit("STOP: framebuffer source SHA mismatch")
+          allowed = set(['tests/emulate_image_handoff.py', 'tests/framebuffer_publication.py', 'tests/test_framebuffer_publication.py', 'tests/validate_framebuffer_publication.py', 'tests/test_validate_framebuffer.py', 'FRAMEBUFFER_PUBLICATION_RU.md'])
+          with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 1024*1024:
+                  raise SystemExit("STOP: framebuffer archive limits")
+              seen = set()
+              planned = []
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  rel = "/".join(parts[1:])
+                  if not m.isfile() or not parts or parts[0] != "framebuffer-publication" or ".." in parts or rel not in allowed or rel in seen or m.size > 256*1024:
+                      raise SystemExit("STOP: invalid framebuffer member")
+                  seen.add(rel)
+                  planned.append((m,pathlib.Path(rel)))
+              if seen != allowed:
+                  raise SystemExit("STOP: incomplete framebuffer source set")
+              for m,rel in planned:
+                  rel.parent.mkdir(parents=True,exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source,output)
+                  rel.chmod(0o644)
+
       - name: Install verified KDK 13.5 in disposable runner
         if: inputs.mode == 'build'
         shell: bash
@@ -804,6 +834,33 @@ jobs:
             build/empty-table-publication-results.json
             EMPTY_TABLE_PUBLICATION_RU.md
 
+      - name: Test quarantined framebuffer descriptor admission (NO usable framebuffer)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/test_framebuffer_publication.py 2>&1 | tee ci-logs/framebuffer-publication-tests.log
+
+      - name: Execute real XNU framebuffer PTE construction and STOP before second TLBI
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_image_handoff.py --build build/handoff-cpu-model --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --virtual-bootstrap --cache-profile tests/fixtures/dandelion-cpu0-cache-profile.json --cache-profile-only --enter-arm-vm-model --ttbr-consensus-model --tlbi-completion-model --owned-physmap-model --empty-table-publication-model --framebuffer-publication-model --out build/framebuffer-publication-results.json 2>&1 | tee ci-logs/framebuffer-publication-execution.log
+          python3 tests/validate_framebuffer_publication.py build/framebuffer-publication-results.json --profile tests/fixtures/dandelion-cpu0-cache-profile.json 2>&1 | tee ci-logs/framebuffer-publication-validation.log
+          python3 tests/test_validate_framebuffer.py build/framebuffer-publication-results.json 2>&1 | tee ci-logs/framebuffer-validator-mutation-tests.log
+
+      - name: Preserve quarantined FRAMEBUFFER DESCRIPTORS report (NOT a phone image)
+        if: success() && inputs.mode == 'build'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dandelion-FRAMEBUFFER-DESCRIPTORS-MODEL-NOT-FOR-PHONE-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            build/framebuffer-publication-results.json
+            FRAMEBUFFER_PUBLICATION_RU.md
+
       - name: Test cache-operation model policy (DC ZVA is NOT a no-op)
         if: inputs.mode == 'build'
         shell: bash
@@ -857,6 +914,7 @@ jobs:
             build/tlbi-completion-results.json
             build/owned-physmap-results.json
             build/empty-table-publication-results.json
+            build/framebuffer-publication-results.json
             build/prepare-only-image/build.log
             build/prepare-only-image/layout.json
             build/full-image-entry-results.json
@@ -906,3 +964,4 @@ jobs:
             build/tlbi-completion-results.json
             build/owned-physmap-results.json
             build/empty-table-publication-results.json
+            build/framebuffer-publication-results.json
