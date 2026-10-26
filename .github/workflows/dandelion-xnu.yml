@@ -356,6 +356,35 @@ jobs:
             python3 ci/check_snapshot.py
           } 2>&1 | tee ci-logs/environment.log
 
+      - name: Verify and unpack register cache probe source (no private images)
+        shell: python3 {0}
+        run: |
+          import hashlib, pathlib, tarfile, shutil
+          archive = pathlib.Path("register-cache-probe-source.tar.gz")
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != "7a89c915a4425b84ec7fdd6871586d29757b3f5bfa06dbe323b2b8e6c3d0bb5f":
+              raise SystemExit("STOP: register probe source SHA mismatch")
+          allowed = set(['cache_probe/README_RU.md', 'cache_probe/avbtool.py', 'cache_probe/build_probe.py', 'cache_probe/decode_cache.py', 'cache_probe/prepare_on_pc.py', 'cache_probe/probe.S', 'cache_probe/probe.ld', 'cache_probe/profile.py', 'cache_probe/read_expdb.py', 'cache_probe/test_probe.py', 'tests/cache_operation_policy.py', 'tests/emulate_image_handoff.py', 'tests/test_cache_operation_policy.py'])
+          with tarfile.open(archive, "r:gz") as tf:
+              members = tf.getmembers()
+              if len(members) != len(allowed) or sum(m.size for m in members) > 2*1024*1024:
+                  raise SystemExit("STOP: unexpected probe archive limits")
+              planned = []
+              seen = set()
+              for m in members:
+                  parts = pathlib.PurePosixPath(m.name).parts
+                  rel = "/".join(parts[1:])
+                  if not m.isfile() or not parts or parts[0] != "dandelion-xnu-port" or rel not in allowed or rel in seen or ".." in parts or m.size > 512*1024:
+                      raise SystemExit("STOP: invalid probe archive entry")
+                  seen.add(rel)
+                  planned.append((m, pathlib.Path(rel)))
+              if seen != allowed:
+                  raise SystemExit("STOP: incomplete probe sources")
+              for m, rel in planned:
+                  rel.parent.mkdir(parents=True, exist_ok=True)
+                  with tf.extractfile(m) as source, rel.open("wb") as output:
+                      shutil.copyfileobj(source, output)
+                  rel.chmod(0o644)
+
       - name: Install verified KDK 13.5 in disposable runner
         if: inputs.mode == 'build'
         shell: bash
@@ -481,6 +510,32 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" tests/emulate_image_handoff.py --build build/handoff-cpu-model --kernel build/macos-dandelion/xnu.obj/kernel.development.dandelion --virtual-bootstrap --out build/virtual-bootstrap-results.json 2>&1 | tee ci-logs/virtual-bootstrap.log
 
+      - name: Test cache-operation model policy (DC ZVA is NOT a no-op)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/test_cache_operation_policy.py 2>&1 | tee ci-logs/cache-operation-policy.log
+
+      - name: Build and audit register-only hardware diagnostic (NOT XNU)
+        if: inputs.mode == 'build'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIG_PATH="$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/dandelion-image-tools/toolchain.json"))["zig"])')"
+          python3 cache_probe/build_probe.py --zig "$ZIG_PATH" --nonce "${{ github.run_id }}" --out build/register-probe-kit 2>&1 | tee ci-logs/register-probe-build.log
+          "$RUNNER_TEMP/dandelion-image-test-venv/bin/python" cache_probe/test_probe.py --build build/register-probe-kit --out build/register-probe-kit/host-test-results.json 2>&1 | tee ci-logs/register-probe-tests.log
+          cp cache_probe/*.py cache_probe/README_RU.md build/register-probe-kit/
+
+      - name: Preserve experimental register diagnostic kit (no private Boot or DTB)
+        if: success() && inputs.mode == 'build'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dandelion-REGISTER-PROBE-EXPERIMENTAL-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: error
+          path: build/register-probe-kit/*
+
       - name: Preserve logs even on build failure (no SDK/KDK/captures)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -503,6 +558,7 @@ jobs:
             build/prepare-only-image/build.log
             build/prepare-only-image/layout.json
             build/full-image-entry-results.json
+            build/register-probe-kit/host-test-results.json
 
       - name: Preserve built kernel (NOT a flash image)
         if: success() && inputs.mode == 'build'
@@ -526,6 +582,7 @@ jobs:
             build/prepare-only-image/layout.json
             build/prepare-only-image/DO-NOT-FLASH.txt
             build/full-image-entry-results.json
+            build/register-probe-kit/host-test-results.json
 
       - name: Preserve CPU MODEL only (NOT a phone image)
         if: success() && inputs.mode == 'build'
